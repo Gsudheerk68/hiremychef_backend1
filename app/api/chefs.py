@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from math import ceil
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Date, String, cast, delete, exists, func, or_, select
+from sqlalchemy import String, cast, delete, exists, func, or_, select
 from sqlalchemy.orm import Session, contains_eager
 from app.api.deps import get_optional_user, require_roles
 from app.db.session import get_db
@@ -20,7 +20,7 @@ SORTS = {
 
 
 def to_out(p: ChefProfile) -> ChefOut:
-    return ChefOut(id=p.id, name=p.user.full_name, city=p.city, years=p.years_experience,
+    return ChefOut(id=p.id, user_id=p.user_id, name=p.user.full_name, city=p.city, years=p.years_experience,
                    cuisines=p.cuisines or [], certifications=p.certifications or [],
                    rating=round(p.rating_avg or 0, 1), reviews=p.review_count, price=float(p.price_per_session or 0),
                    available=p.is_available, verified=p.is_verified, photo=p.photo_url, bio=p.bio)
@@ -34,7 +34,7 @@ def _public_conditions():
 def _unavailable_on(d: date):
     blocked = exists().where(ChefUnavailableDate.chef_id == ChefProfile.id, ChefUnavailableDate.date == d)
     booked = exists().where(Booking.chef_id == ChefProfile.id, Booking.status == BookingStatus.accepted,
-                            func.date(Booking.event_date, type_=Date) == d)
+                            Booking.event_day == d)
     return or_(blocked, booked)
 
 
@@ -139,7 +139,6 @@ def chef_availability(chef_id: int, start: date | None = None, end: date | None 
         raise HTTPException(422, "Date range must be between 0 and 366 days")
     blocked = db.scalars(select(ChefUnavailableDate.date).where(ChefUnavailableDate.chef_id == p.id,
                          ChefUnavailableDate.date.between(start, end)).order_by(ChefUnavailableDate.date)).all()
-    booked = db.scalars(select(func.date(Booking.event_date, type_=Date)).where(Booking.chef_id == p.id,
-                        Booking.status == BookingStatus.accepted,
-                        func.date(Booking.event_date, type_=Date).between(start, end)).distinct()).all()
+    booked = db.scalars(select(Booking.event_day).where(Booking.chef_id == p.id, Booking.status == BookingStatus.accepted,
+                        Booking.event_day.between(start, end)).distinct()).all()
     return AvailabilityOut(start=start, end=end, blocked=list(blocked), booked=sorted(booked))

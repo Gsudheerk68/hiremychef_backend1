@@ -3,10 +3,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.api.deps import require_roles
 from app.db.session import get_db
-from app.models import ChefProfile, User, UserRole
+from app.models import Booking, ChefProfile, User, UserRole
 from app.schemas.auth import UserOut
 from app.schemas.chef import ChefOut
 from app.api.chefs import to_out
+from app.api.bookings import LOAD as BOOKING_LOAD, to_out as booking_out
+from app.schemas.booking import BookingOut
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_roles(UserRole.admin))])
 
@@ -43,3 +45,8 @@ def verify_chef(chef_id: int, db: Session = Depends(get_db)):
 @router.post("/chefs/{chef_id}/unverify", response_model=ChefOut)
 def unverify_chef(chef_id: int, db: Session = Depends(get_db)):
     return _set_verified(db, chef_id, False)
+
+
+@router.get("/bookings", response_model=list[BookingOut])
+def all_bookings(db: Session = Depends(get_db)):
+    return [booking_out(b) for b in db.scalars(select(Booking).options(*BOOKING_LOAD).order_by(Booking.event_date.desc()))]

@@ -68,7 +68,7 @@ def test_availability_block_booked_and_filter(client):
     assert client.post("/api/v1/chefs/me/availability/block", headers=H(token), json={"dates": [d1.isoformat()]}).status_code == 204
     with client.Session() as db:  # an accepted booking on d2
         cid = db.query(User).filter_by(email="admin@x.com").one().id
-        db.add(Booking(customer_id=cid, chef_id=pid, service_type="Dinner", event_date=datetime.combine(d2, datetime.min.time(), tzinfo=timezone.utc),
+        db.add(Booking(customer_id=cid, chef_id=pid, service_type="Dinner", event_date=datetime.combine(d2, datetime.min.time(), tzinfo=timezone.utc), event_day=d2,
                        guests=4, location="Nellore", status=BookingStatus.accepted))
         db.commit()
     a = client.get(f"/api/v1/chefs/{pid}/availability").json()

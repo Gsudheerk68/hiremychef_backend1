@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 class ChefOut(BaseModel):
     """Field names match what the React frontend already uses."""
     id: int
+    user_id: int
     name: str
     city: str | None
     years: int

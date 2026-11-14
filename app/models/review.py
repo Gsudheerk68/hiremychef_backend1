@@ -16,4 +16,5 @@ class Review(Base):
     comment: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    customer: Mapped["User"] = relationship(foreign_keys=[customer_id])
     booking: Mapped["Booking"] = relationship(back_populates="review")

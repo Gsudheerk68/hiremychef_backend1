@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     reset_token_expire_minutes: int = 30
     jwt_algorithm: str = "HS256"
+    ai_index_path: str = "data/chef_index.joblib"
+    ai_review_snippets: int = 5  # recent review comments added to each chef document
 
     @property
     def cors_list(self) -> list[str]:
