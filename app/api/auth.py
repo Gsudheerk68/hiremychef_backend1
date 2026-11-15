@@ -1,14 +1,16 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import get_settings
+from app.core.google_auth import GoogleAuthError, verify_google_credential
 from app.core.security import create_token, decode_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models import ChefProfile, User, UserRole
-from app.schemas.auth import (ForgotPasswordRequest, LoginRequest, RegisterRequest,
-                              ResetPasswordRequest, TokenOut, UserOut)
+from app.schemas.auth import (ForgotPasswordRequest, GoogleLoginOut, GoogleLoginRequest, LoginRequest,
+                              RegisterRequest, ResetPasswordRequest, TokenOut, UserOut)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 log = logging.getLogger("auth")
@@ -38,6 +40,48 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is disabled")
     return TokenOut(token=create_token(user.id), user=UserOut.model_validate(user))
+
+
+@router.post("/google", response_model=GoogleLoginOut)
+def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
+    """Sign in or sign up with a Google ID token. Returns the same app token as /login."""
+    try:
+        g = verify_google_credential(body.credential)
+    except GoogleAuthError as e:
+        raise HTTPException(e.status_code, str(e))
+
+    user = db.scalar(select(User).where(User.google_sub == g["sub"]))
+    if not user:
+        user = db.scalar(select(User).where(User.email == g["email"]))
+        if user and user.google_sub and user.google_sub != g["sub"]:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This email is linked to a different Google account")
+
+    if user:
+        if user.role == UserRole.admin:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins must sign in with email and password")
+        if not user.is_active:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is disabled")
+        if not user.google_sub:  # first Google sign-in on an existing account: Google verified the email, so link it
+            user.google_sub = g["sub"]
+            db.commit()
+        return GoogleLoginOut(token=create_token(user.id), user=UserOut.model_validate(user))
+
+    # brand-new person: we need to know whether they are a customer or a chef
+    if body.role is None:
+        return GoogleLoginOut(needs_role=True, email=g["email"], name=g["name"])
+
+    user = User(email=g["email"], full_name=g["name"][:120], phone=body.phone, hashed_password=None,
+                google_sub=g["sub"], role=UserRole(body.role))
+    if body.role == "chef":
+        user.chef_profile = ChefProfile(city=body.city, cuisines=body.cuisines,
+                                        years_experience=body.years_experience, is_verified=False)
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:  # two requests raced to create the same account
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Could not create the account. Please try again.")
+    return GoogleLoginOut(token=create_token(user.id), user=UserOut.model_validate(user), is_new=True)
 
 
 @router.get("/me", response_model=UserOut)

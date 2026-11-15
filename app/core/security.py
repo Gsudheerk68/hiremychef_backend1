@@ -7,12 +7,14 @@ from app.core.config import get_settings
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-
-def verify_password(password: str, hashed: str) -> bool:
+def verify_password(password: str, hashed: str | None) -> bool:
+    if not hashed:  # Google-only account: no password login
+        return False
     try:
         return bcrypt.checkpw(password.encode(), hashed.encode())
     except ValueError:
         return False
+
 
 
 def create_token(subject: int, purpose: str = "access", minutes: int | None = None) -> str:

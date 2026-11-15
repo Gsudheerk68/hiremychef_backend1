@@ -1,4 +1,7 @@
-"""Chatbot endpoints: POST /ai/chat and POST /ai/chat/confirm (login required)."""
+"""Chatbot endpoints (login required).
+POST /ai/chat and /ai/chat/confirm              -> one JSON reply
+POST /ai/chat/stream and /ai/chat/confirm/stream -> Server-Sent Events (progressive reply)
+"""
 import json
 import logging
 import re
@@ -6,6 +9,8 @@ import threading
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessageChunk
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
@@ -17,6 +22,13 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/ai", tags=["ai-chat"])
 
 THREAD_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+TOOL_STATUS = {
+    "search_chefs": "Searching chefs…",
+    "get_chef_details": "Looking up chef details…",
+    "check_chef_availability": "Checking availability…",
+    "estimate_booking_price": "Estimating the price…",
+    "create_booking": "Preparing your booking…",
+}
 
 _graph = None
 _graph_lock = threading.Lock()
@@ -74,9 +86,9 @@ def _check_thread_id(thread_id: str) -> None:
         raise HTTPException(422, "thread_id must be 8-64 letters, digits, '-' or '_'")
 
 
-def _config(user: User, thread_id: str) -> tuple[str, dict]:
-    key = f"u{user.id}:{thread_id}"  # namespaced so users cannot reach each other's threads
-    return key, {"configurable": {"thread_id": key, "user_id": user.id}}
+def _config(user_id: int, thread_id: str) -> tuple[str, dict]:
+    key = f"u{user_id}:{thread_id}"  # namespaced so users cannot reach each other's threads
+    return key, {"configurable": {"thread_id": key, "user_id": user_id}}
 
 
 def _pending(graph, config: dict) -> dict | None:
@@ -99,19 +111,12 @@ def _last_reply(graph, config: dict) -> str:
     return ""
 
 
-def _turn_chefs(graph, config: dict) -> tuple[list[ChatChef], str | None]:
-    """Chef cards come from the latest search_chefs RESULT in this turn, not from the model's text."""
-    found = None
-    for m in reversed(graph.get_state(config).values.get("messages", [])):
-        if m.type == "human":
-            break  # only look at the current turn
-        if m.type == "tool" and getattr(m, "name", None) == "search_chefs" and found is None:
-            try:
-                found = json.loads(_text(m.content))
-            except (ValueError, TypeError):
-                found = None
-    if not isinstance(found, dict):
-        return [], None
+def _is_search_result(data) -> bool:
+    return isinstance(data, dict) and "chefs" in data and "ranked_by" in data
+
+
+def _cards(found: dict) -> list[ChatChef]:
+    """Chef cards are built from the search_chefs RESULT, never from the model's wording."""
     chefs = []
     for c in (found.get("chefs") or [])[:5]:
         try:
@@ -122,12 +127,29 @@ def _turn_chefs(graph, config: dict) -> tuple[list[ChatChef], str | None]:
                 reason=" · ".join(c.get("reasons") or []),
                 factors=c.get("factors") or []))
         except (KeyError, ValueError):
-            continue
-    return chefs, found.get("ranked_by")
+            log.exception("could not build a chef card from %r", c)
+    return chefs
 
 
-def _run(user: User, thread_id: str, make_input, require_pending: bool) -> ChatOut:
-    key, config = _config(user, thread_id)
+def _turn_chefs(graph, config: dict) -> tuple[list[ChatChef], str | None]:
+    """Latest search_chefs result in the current turn (stops at the last human message)."""
+    for m in reversed(graph.get_state(config).values.get("messages", [])):
+        if m.type == "human":
+            break
+        if m.type == "tool":
+            try:
+                data = json.loads(_text(m.content))
+            except (ValueError, TypeError):
+                continue
+            if _is_search_result(data):
+                return _cards(data), data.get("ranked_by")
+    return [], None
+
+
+# ---------- one-shot JSON endpoints ----------
+
+def _run(user_id: int, thread_id: str, make_input, require_pending: bool) -> ChatOut:
+    key, config = _config(user_id, thread_id)
     lock = _thread_lock(key)
     if not lock.acquire(blocking=False):
         raise HTTPException(429, "Still working on your previous message. Please wait a moment.")
@@ -162,10 +184,112 @@ def _run(user: User, thread_id: str, make_input, require_pending: bool) -> ChatO
 def chat(body: ChatIn, user: User = Depends(get_current_user)):
     thread_id = body.thread_id or uuid.uuid4().hex
     _check_thread_id(thread_id)
-    return _run(user, thread_id, lambda: {"messages": [("user", body.message)]}, require_pending=False)
+    return _run(user.id, thread_id, lambda: {"messages": [("user", body.message)]}, require_pending=False)
 
 
 @router.post("/chat/confirm", response_model=ChatOut)
 def confirm(body: ConfirmIn, user: User = Depends(get_current_user)):
     _check_thread_id(body.thread_id)
-    return _run(user, body.thread_id, lambda: Command(resume=body.confirm), require_pending=True)
+    return _run(user.id, body.thread_id, lambda: Command(resume=body.confirm), require_pending=True)
+
+
+# ---------- streaming (Server-Sent Events) endpoints ----------
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _stream_run(user_id: int, thread_id: str, make_input, require_pending: bool):
+    """Generator of SSE frames. The per-thread lock is taken and released inside it, so it is
+    always freed when the stream ends or the browser disconnects."""
+    key, config = _config(user_id, thread_id)
+    lock = _thread_lock(key)
+    if not lock.acquire(blocking=False):
+        yield _sse("error", {"status": 429, "message": "Still working on your previous message. Please wait a moment."})
+        return
+    try:
+        graph = get_graph()
+        pending = _pending(graph, config)
+
+        if require_pending and not pending:
+            yield _sse("error", {"status": 409, "message": "There is no booking waiting for confirmation."})
+            return
+        if not require_pending and pending:  # user typed instead of confirming: show it again
+            yield _sse("confirm", pending)
+            yield _sse("done", {"thread_id": thread_id, "reply": "Please confirm or cancel this booking first.",
+                                "pending_confirmation": pending, "chefs": [], "ranked_by": None})
+            return
+
+        yield _sse("status", {"text": "Thinking…"})
+        streamed = False      # tokens already sent for the current model step
+        interrupted = None
+        for mode, chunk in graph.stream(make_input(), config, stream_mode=["messages", "updates"]):
+            if mode == "messages":
+                msg, meta = chunk
+                if (meta.get("langgraph_node") == "agent" and isinstance(msg, AIMessageChunk)
+                        and not msg.tool_call_chunks):
+                    text = _text(msg.content)
+                    if text:
+                        streamed = True
+                        yield _sse("token", {"text": text})
+                continue
+            if mode != "updates":
+                continue
+            for node, data in chunk.items():
+                if node == "__interrupt__":
+                    interrupted = data[0].value
+                    continue
+                for m in (data or {}).get("messages", []):
+                    if node == "agent":
+                        calls = getattr(m, "tool_calls", None) or []
+                        if calls:
+                            if streamed:  # the model wrote text and then called a tool: drop that text
+                                yield _sse("reset", {})
+                            for call in calls:
+                                yield _sse("status", {"text": TOOL_STATUS.get(call["name"], "Working…")})
+                        streamed = False
+                    elif node == "tools" and getattr(m, "type", "") == "tool":
+                        try:
+                            found = json.loads(_text(m.content))
+                        except (ValueError, TypeError):
+                            continue
+                        if _is_search_result(found):
+                            yield _sse("chefs", {"chefs": [c.model_dump() for c in _cards(found)],
+                                                 "ranked_by": found.get("ranked_by")})
+
+        pending = interrupted or _pending(graph, config)
+        if pending:
+            yield _sse("confirm", pending)
+            yield _sse("done", {"thread_id": thread_id, "reply": "Please review and confirm this booking.",
+                                "pending_confirmation": pending, "chefs": [], "ranked_by": None})
+            return
+        chefs, ranked_by = _turn_chefs(graph, config)
+        yield _sse("done", {"thread_id": thread_id,
+                            "reply": _last_reply(graph, config) or "Sorry, I could not answer that.",
+                            "pending_confirmation": None,
+                            "chefs": [c.model_dump() for c in chefs], "ranked_by": ranked_by})
+    except Exception:
+        log.exception("chatbot stream failed")
+        yield _sse("error", {"status": 503, "message": "The assistant is unavailable right now. Please try again."})
+    finally:
+        lock.release()
+
+
+def _sse_response(generator) -> StreamingResponse:
+    return StreamingResponse(generator, media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+@router.post("/chat/stream")
+def chat_stream(body: ChatIn, user: User = Depends(get_current_user)):
+    thread_id = body.thread_id or uuid.uuid4().hex
+    _check_thread_id(thread_id)
+    user_id = user.id  # a plain int: the request's database session may be closed while streaming
+    return _sse_response(_stream_run(user_id, thread_id, lambda: {"messages": [("user", body.message)]}, False))
+
+
+@router.post("/chat/confirm/stream")
+def confirm_stream(body: ConfirmIn, user: User = Depends(get_current_user)):
+    _check_thread_id(body.thread_id)
+    user_id = user.id
+    return _sse_response(_stream_run(user_id, body.thread_id, lambda: Command(resume=body.confirm), True))

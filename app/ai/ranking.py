@@ -15,6 +15,7 @@ from app.services.pricing import INCLUDED_GUESTS, estimate_price
 MIN_RESULTS = 3
 RELAX_ORDER = ("availability", "budget", "city")  # first relaxed first; the city is the last thing we give up
 WEIGHTS = {"similarity": 0.55, "rating": 0.20, "experience": 0.10, "budget_fit": 0.15}
+OUT_OF_CITY_FACTOR = 0.85  # score multiplier for chefs outside the requested city (city comes first)
 
 
 @dataclass
@@ -137,6 +138,10 @@ def recommend(db: Session, query: str, limit: int = 5, today: date | None = None
         ml_scores, ml_factors = None, {}  # chef list changed between index and model; use the safe path
     result.scorer = "ml" if ml_scores is not None else "rules"
 
+    def in_city(cid: int) -> bool:
+        """True when the chef is in the city the customer asked for."""
+        return bool(p.city) and (idx.metadata[cid].get("city") or "").lower() == p.city.lower()
+
     wanted = [c.lower() for c in p.cuisines]
     ranked = []
     for cid in candidates:
@@ -152,8 +157,11 @@ def recommend(db: Session, query: str, limit: int = 5, today: date | None = None
             fit = 0.5 if not p.budget else max(0.0, min(1.0, 1 - 0.5 * est / p.budget))
             score = (WEIGHTS["similarity"] * similarity + WEIGHTS["rating"] * meta["rating"] / 5
                      + WEIGHTS["experience"] * min(meta["years"], 20) / 20 + WEIGHTS["budget_fit"] * fit)
+        if p.city and not in_city(cid):
+            score *= OUT_OF_CITY_FACTOR  # city comes first: out-of-city chefs show a lower match %
         ranked.append((score, meta["rating"], cid, est, matched))
-    ranked.sort(key=lambda r: (-r[0], -r[1], r[2]))
+    # local chefs first, then by score, then rating, then id (stable)
+    ranked.sort(key=lambda r: (not in_city(r[2]), -r[0], -r[1], r[2]))
 
     for score, _, cid, est, matched in ranked[:limit]:
         meta = idx.metadata[cid]

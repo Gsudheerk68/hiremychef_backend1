@@ -48,3 +48,21 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str = Field(min_length=8, max_length=64)
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(min_length=20, max_length=4096)
+    # only needed the first time: Google cannot tell us whether this person is a customer or a chef
+    role: Literal["customer", "chef"] | None = None
+    phone: str | None = Field(default=None, max_length=20)
+    city: str | None = Field(default=None, max_length=80)
+    cuisines: list[str] = []
+    years_experience: int = Field(default=0, ge=0, le=60)
+
+
+class GoogleLoginOut(BaseModel):
+    token: str | None = None
+    token_type: str = "bearer"
+    user: UserOut | None = None
+    needs_role: bool = False  # true: new Google user, ask customer/chef and send the credential again
+    is_new: bool = False
+    email: EmailStr | None = None
+    name: str | None = None

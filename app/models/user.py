@@ -10,7 +10,8 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(255))
+    hashed_password: Mapped[str | None] = mapped_column(String(255))  # None for Google-only accounts
+    google_sub: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)  # Google's stable user id
     full_name: Mapped[str] = mapped_column(String(120))
     phone: Mapped[str | None] = mapped_column(String(20))
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.customer, index=True)
