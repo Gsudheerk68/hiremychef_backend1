@@ -1,0 +1,82 @@
+{
+  "trained_at": "2026-11-14T11:22:47+00:00",
+  "model": "LightGBM LGBMRanker (LambdaRank)",
+  "dataset": "train_v2.csv",
+  "label_source": "simulated",
+  "data": {
+    "rows": 17600,
+    "queries": 800,
+    "train_queries": 640,
+    "test_queries": 160
+  },
+  "metrics": {
+    "ndcg@3": {
+      "random": 0.3613,
+      "current_formula": 0.749,
+      "lightgbm": 0.8696
+    },
+    "ndcg@5": {
+      "random": 0.4307,
+      "current_formula": 0.7721,
+      "lightgbm": 0.8872
+    }
+  },
+  "features": [
+    {
+      "name": "tfidf_sim",
+      "label": "Keyword similarity (TF-IDF)",
+      "importance_percent": 56.7
+    },
+    {
+      "name": "embed_sim",
+      "label": "Meaning similarity (embeddings)",
+      "importance_percent": 11.3
+    },
+    {
+      "name": "years",
+      "label": "Years of experience",
+      "importance_percent": 6.5
+    },
+    {
+      "name": "cuisine_match",
+      "label": "Cuisine match",
+      "importance_percent": 5.7
+    },
+    {
+      "name": "rating",
+      "label": "Chef rating",
+      "importance_percent": 5.3
+    },
+    {
+      "name": "price_ratio",
+      "label": "Price vs budget",
+      "importance_percent": 4.7
+    },
+    {
+      "name": "city_match",
+      "label": "City match",
+      "importance_percent": 3.7
+    },
+    {
+      "name": "reviews_log",
+      "label": "Number of reviews",
+      "importance_percent": 2.0
+    },
+    {
+      "name": "budget_fit",
+      "label": "Budget fit",
+      "importance_percent": 1.5
+    },
+    {
+      "name": "event_idx",
+      "label": "Event type",
+      "importance_percent": 1.5
+    },
+    {
+      "name": "guests",
+      "label": "Guest count",
+      "importance_percent": 1.0
+    }
+  ],
+  "note": "Labels come from a simulated user-preference model, so these scores show the pipeline works. They are not real-world accuracy. Real clicks and bookings are needed to measure that."
+}

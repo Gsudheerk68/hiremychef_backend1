@@ -1,9 +1,11 @@
 """Filters + hybrid ranking. Pipeline: parse query -> hard filters (relaxed if too few chefs) -> TF-IDF similarity
 -> weighted score -> top results with plain-language reasons that come only from real chef data."""
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from app.ai import ml_ranker
 from app.ai.parser import ParsedQuery, parse_query
 from app.ai.service import get_index
 from app.core.timeutils import now_local
@@ -23,6 +25,7 @@ class Recommendation:
     estimated_price: int
     reasons: list[str]
     metadata: dict
+    factors: list[dict] = field(default_factory=list)  # "why this rank" from the ML model
 
 
 @dataclass
@@ -31,6 +34,7 @@ class RecommendationResult:
     relaxed: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     results: list[Recommendation] = field(default_factory=list)
+    scorer: str = "rules"  # "ml" when the LightGBM ranker produced the scores
 
 
 def unavailable_chef_ids(db: Session, day: date) -> set[int]:
@@ -84,6 +88,12 @@ def _reasons(meta, p, est, matched_cuisines, relaxed, unavailable_here) -> list[
     return out
 
 
+def _to_unit(x: float) -> float:
+    """LightGBM scores are unbounded; squash to 0..1 for the existing match_percent display."""
+    x = max(-50.0, min(50.0, x))
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 def recommend(db: Session, query: str, limit: int = 5, today: date | None = None, min_results: int = MIN_RESULTS) -> RecommendationResult:
     idx = get_index(db)
     today = today or now_local().date()
@@ -119,19 +129,29 @@ def recommend(db: Session, query: str, limit: int = 5, today: date | None = None
         return result  # nothing in the request relates to any chef (e.g. unrelated text)
     top_sim = max(sims.values(), default=0.0)
 
-    # 3. weighted score
+    # 3. score: ML ranker when available, otherwise the hand-weighted formula
+    ml_out = ml_ranker.score_candidates(
+        db, query, p, candidates, lambda cid: _estimate(idx.metadata[cid], p))
+    ml_scores, ml_factors = ml_out if ml_out is not None else (None, {})
+    if ml_scores is not None and any(cid not in ml_scores for cid in candidates):
+        ml_scores, ml_factors = None, {}  # chef list changed between index and model; use the safe path
+    result.scorer = "ml" if ml_scores is not None else "rules"
+
     wanted = [c.lower() for c in p.cuisines]
     ranked = []
     for cid in candidates:
         meta = idx.metadata[cid]
         have = {c.lower() for c in meta.get("cuisines", [])}
         matched = [c for c in p.cuisines if c.lower() in have]
-        sim_n = sims.get(cid, 0.0) / top_sim if top_sim else 0.0
-        similarity = 0.6 * (len(matched) / len(wanted)) + 0.4 * sim_n if wanted else sim_n
         est = _estimate(meta, p)
-        fit = 0.5 if not p.budget else max(0.0, min(1.0, 1 - 0.5 * est / p.budget))
-        score = (WEIGHTS["similarity"] * similarity + WEIGHTS["rating"] * meta["rating"] / 5
-                 + WEIGHTS["experience"] * min(meta["years"], 20) / 20 + WEIGHTS["budget_fit"] * fit)
+        if ml_scores is not None:
+            score = _to_unit(ml_scores[cid])
+        else:
+            sim_n = sims.get(cid, 0.0) / top_sim if top_sim else 0.0
+            similarity = 0.6 * (len(matched) / len(wanted)) + 0.4 * sim_n if wanted else sim_n
+            fit = 0.5 if not p.budget else max(0.0, min(1.0, 1 - 0.5 * est / p.budget))
+            score = (WEIGHTS["similarity"] * similarity + WEIGHTS["rating"] * meta["rating"] / 5
+                     + WEIGHTS["experience"] * min(meta["years"], 20) / 20 + WEIGHTS["budget_fit"] * fit)
         ranked.append((score, meta["rating"], cid, est, matched))
     ranked.sort(key=lambda r: (-r[0], -r[1], r[2]))
 
@@ -139,5 +159,6 @@ def recommend(db: Session, query: str, limit: int = 5, today: date | None = None
         meta = idx.metadata[cid]
         result.results.append(Recommendation(
             chef_id=cid, score=round(score, 4), match_percent=max(0, min(100, round(score * 100))), estimated_price=est,
-            reasons=_reasons(meta, p, est, matched, relaxed, cid in unavailable), metadata=meta))
+            reasons=_reasons(meta, p, est, matched, relaxed, cid in unavailable), metadata=meta,
+            factors=ml_factors.get(cid, [])))
     return result

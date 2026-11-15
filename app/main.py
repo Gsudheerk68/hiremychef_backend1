@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.api import admin, auth, bookings, chefs, health, reviews
-
+from app.api import admin, ai_chat, auth, bookings, chefs, health, ml_info, reviews
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list,
@@ -13,3 +12,5 @@ app.include_router(admin.router, prefix="/api/v1")
 app.include_router(chefs.router, prefix="/api/v1")
 app.include_router(bookings.router, prefix="/api/v1")
 app.include_router(reviews.router, prefix="/api/v1")
+app.include_router(ai_chat.router, prefix="/api/v1")   # POST /ai/chat, /ai/chat/confirm
+app.include_router(ml_info.router, prefix="/api/v1") 
